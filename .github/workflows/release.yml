@@ -1,0 +1,91 @@
+name: Automatic Release
+
+on:
+  workflow_run:
+    workflows: ["build"]
+    branches: [main]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Get version from gradle.properties
+        id: get_version
+        run: |
+          VERSION=$(grep '^mod_version=' gradle.properties | cut -d'=' -f2 | tr -d '\r')
+          LOADER=$(grep '^loader_version=' gradle.properties | cut -d'=' -f2 | tr -d '\r')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "loader=$LOADER" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Download build artifacts
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: Artifacts
+          path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clean and rename JARs
+        run: |
+          set -e
+          find artifacts -name "*-dev.jar" -delete
+          find artifacts -name "*-sources.jar" -delete
+          find artifacts -mindepth 2 -name "*.jar" -exec mv {} artifacts/ \;
+          find artifacts -mindepth 1 -type d -delete
+          echo "=== Release JARs ==="
+          ls -l artifacts/*.jar
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: "DailyRewards v${{ steps.get_version.outputs.version }}"
+          body: |
+            ## 🎁 DailyRewards v${{ steps.get_version.outputs.version }}
+            
+            **📥 Downloads:** One JAR per Minecraft version — pick the one matching your game version.
+            
+            **🔧 Compatibility:**
+            | Module | Minecraft Versions |
+            |--------|-------------------|
+            | 1-21-3 | 1.21.3 |
+            | 1-21-4 | 1.21.4 |
+            | 1-21-5 | 1.21.5 |
+            | 1-21-6 | 1.21.6, 1.21.7, 1.21.8 |
+            | 1-21-10 | 1.21.9, 1.21.10 |
+            | 1-21-11 | 1.21.11 |
+            
+            **Requirements:**
+            - Fabric Loader ${{ steps.get_version.outputs.loader }}+
+            - Fabric API required
+            - Fabric Language Kotlin required
+            
+            **📋 Changes:**
+            Build from commit: ${{ github.sha }}
+            
+            **🔗 Links:**
+            - [Modrinth Page](https://modrinth.com/mod/hypixel-dailyrewards)
+            - [GitHub Repository](https://github.com/Cqseur/DailyRewards)
+            
+          prerelease: false
+          draft: false
+          files: |
+            artifacts/*.jar

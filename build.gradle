@@ -1,0 +1,356 @@
+// Root build.gradle - Configuration multi-modules
+plugins {
+	id 'fabric-loom' version "${loom_version}" apply false
+	id "org.jetbrains.kotlin.jvm" version "2.1.21" apply false
+	id 'com.modrinth.minotaur' version '2.+' apply false
+	id 'maven-publish'
+}
+
+// Mapping module name -> Minecraft game versions supported by that module
+def moduleGameVersions = [
+	'1-21-3' : ['1.21.3'],
+	'1-21-4' : ['1.21.4'],
+	'1-21-5' : ['1.21.5'],
+	'1-21-6' : ['1.21.6', '1.21.7', '1.21.8'],
+	'1-21-10': ['1.21.9', '1.21.10'],
+	'1-21-11': ['1.21.11'],
+]
+
+def changelogFile = new File(rootDir, 'changelog')
+def changelogContent = changelogFile.exists() ? changelogFile.text : 'No changelog provided.'
+
+subprojects {
+	apply plugin: 'fabric-loom'
+	apply plugin: 'org.jetbrains.kotlin.jvm'
+	apply plugin: 'maven-publish'
+	apply plugin: 'com.modrinth.minotaur'
+	
+	group = rootProject.properties.maven_group
+	version = rootProject.properties.mod_version
+	
+	repositories {
+		maven { url = 'https://maven.shedaniel.me/' }
+		maven { url = 'https://maven.terraformersmc.com/' }
+	}
+	
+	tasks.withType(org.gradle.api.tasks.compile.AbstractCompile).configureEach {
+		options.warnings = false
+	}
+	
+	gradle.beforeProject { proj ->
+		proj.ext.set('org.gradle.deprecation.trace', false)
+	}
+	
+	java {
+		sourceCompatibility = JavaVersion.VERSION_21
+		targetCompatibility = JavaVersion.VERSION_21
+	}
+	
+	publishing {
+		publications {
+			mavenJava(MavenPublication) {
+				artifactId = project.base.archivesName.get()
+				from components.java
+			}
+		}
+	}
+
+	modrinth {
+		token = System.getenv('MODRINTH_TOKEN')
+		projectId = 'AoDOmdGD'
+		versionNumber = rootProject.properties.mod_version
+		versionName = "DailyRewards ${rootProject.properties.mod_version}"
+		versionType = 'release'
+		uploadFile = remapJar
+		changelog = changelogContent
+			.replace('{mod_version}', rootProject.properties.mod_version)
+			.replace('{mc_version}', project.minecraft_version)
+			.replace('{loader_version}', rootProject.properties.loader_version)
+		gameVersions = moduleGameVersions.getOrDefault(project.name, [])
+		loaders = ['fabric']
+		debugMode = rootProject.hasProperty('dry')
+
+		dependencies {
+			required.project 'fabric-api'
+			required.project 'fabric-language-kotlin'
+		}
+	}
+}
+
+def DateFormatted = { new java.text.SimpleDateFormat("HH:mm:ss")
+            .format(new Date()) 
+}
+
+def copyToClipboard = { File file ->
+    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+        providers.exec {
+            commandLine 'powershell', '-NoProfile', '-Command',
+                        "Set-Clipboard -Path '${file.absolutePath}'"
+        }.result.get()
+    }
+}
+
+tasks.register('buildAll') {
+	dependsOn '1-21-3:build', '1-21-4:build', '1-21-5:build', '1-21-6:build', '1-21-10:build', '1-21-11:build'
+	group = 'build'
+	description = 'Build tous les modules (1.21.3, 1.21.4, 1.21.5, 1.21.6, 1.21.10 et 1.21.11)'
+}
+
+tasks.register('buildAndCopyAllToMods') {
+	dependsOn '1-21-3:build', '1-21-4:build', '1-21-5:build', '1-21-6:build', '1-21-10:build', '1-21-11:build'
+	finalizedBy 'copyToMods'
+	group = 'build'
+	description = 'Build All mods then copy them to mods folder'
+}
+
+tasks.register('publishToModrinth') {
+	dependsOn '1-21-3:modrinth', '1-21-4:modrinth', '1-21-5:modrinth', '1-21-6:modrinth', '1-21-10:modrinth', '1-21-11:modrinth'
+	group = 'publishing'
+	description = 'Build and publish all modules to Modrinth'
+}
+
+tasks.register('debugChangelog') {
+	group = 'help'
+	description = 'Generate resolved changelog previews in a temp folder'
+
+	def modVersion = rootProject.properties.mod_version
+	def loaderVer = rootProject.properties.loader_version
+	def rawContent = changelogContent
+	def moduleVersions = [:]
+	subprojects.findAll { it.name != 'common' }.each { subproj ->
+		moduleVersions[subproj.name] = subproj.properties.minecraft_version ?: subproj.name.replace('-', '.')
+	}
+
+	doLast {
+		def tempDir = new File(System.getProperty('java.io.tmpdir'), 'dailyrewards-changelog-preview')
+		if (tempDir.exists()) tempDir.deleteDir()
+		tempDir.mkdirs()
+
+		moduleVersions.each { moduleName, mcVersion ->
+			def resolved = rawContent
+				.replace('{mod_version}', modVersion)
+				.replace('{mc_version}', mcVersion)
+				.replace('{loader_version}', loaderVer)
+
+			def outFile = new File(tempDir, "changelog-${moduleName}.md")
+			outFile.text = resolved
+			println "[>] Generated: ${outFile.absolutePath}"
+		}
+
+		println "\n[OK] Changelog previews saved to: ${tempDir.absolutePath}"
+	}
+}
+
+tasks.register('copyToMods') {
+	mustRunAfter '1-21-3:build', '1-21-4:build', '1-21-5:build', '1-21-6:build', '1-21-10:build', '1-21-11:build'
+	group = 'build'
+	description = 'Smart task to copy recently builded mod to mods folder only'
+
+	// Resolve all project-relative paths at configuration time (configuration cache safe)
+	def envFile = new File(rootDir, '.env')
+	def subprojectLibsDirs = [:]
+	subprojects.findAll { it.name != 'common' }.each { subproj ->
+		subprojectLibsDirs[subproj.name] = new File(subproj.layout.buildDirectory.asFile.getOrNull() ?: new File(subproj.projectDir, 'build'), 'libs')
+	}
+
+	doLast {
+		def envVars = [:]
+		if (envFile.exists()) {
+			envFile.readLines().each { line ->
+				if (line.contains('=') && !line.startsWith('#')) {
+					def parts = line.split('=', 2)
+					envVars[parts[0].trim()] = parts[1].trim()
+				}
+			}
+		}
+
+		def modsPaths = []
+		if (envVars.GameModPath) modsPaths.add(envVars.GameModPath)
+		if (envVars.GameModPath2) modsPaths.add(envVars.GameModPath2)
+
+		if (modsPaths.isEmpty()) {
+			println "[${DateFormatted()}] [!] No mods paths found in .env file!"
+			return
+		}
+
+		// Detect which modules have built JARs
+		def modulesToCopy = []
+		subprojectLibsDirs.each { moduleName, libsDir ->
+			if (libsDir.exists()) {
+				def jars = libsDir.listFiles()?.findAll {
+					it.name.endsWith('.jar') &&
+					!it.name.contains('-dev') &&
+					!it.name.contains('-sources')
+				}
+				if (jars && !jars.isEmpty()) {
+					modulesToCopy.add(moduleName)
+				}
+			}
+		}
+
+		if (modulesToCopy.isEmpty()) {
+			println "[${DateFormatted()}] [!] No modules to copy. Build a module first!"
+			println "Example: ./gradlew :1-21-4:build copyToMods"
+			return
+		}
+
+		println "[${DateFormatted()}] [>] Copying ${modulesToCopy.size()} module(s): ${modulesToCopy.join(', ')}"
+
+		def allJars = []
+		modulesToCopy.each { moduleName ->
+			def libsDir = subprojectLibsDirs[moduleName]
+			if (libsDir.exists()) {
+				def jars = libsDir.listFiles().findAll {
+					it.name.endsWith('.jar') &&
+					!it.name.contains('-dev') &&
+					!it.name.contains('-sources')
+				}
+				if (!jars.isEmpty()) {
+					def mostRecent = jars.max { it.lastModified() }
+					allJars.add(mostRecent)
+				}
+			}
+		}
+
+		modsPaths.each { pathStr ->
+			def modsDir = new File(pathStr)
+
+			if (!modsDir.exists()) {
+				modsDir.mkdirs()
+				println "[${DateFormatted()}] Created directory: ${modsDir.absolutePath}"
+			}
+
+			modsDir.listFiles()?.each { oldMod ->
+				if (oldMod.name.toLowerCase().contains('dailyrewards') && oldMod.name.endsWith('.jar')) {
+					oldMod.delete()
+					println "[${DateFormatted()}] Removed: ${oldMod.name} from ${modsDir.absolutePath}"
+				}
+			}
+
+			allJars.each { jar ->
+				def targetFile = new File(modsDir, jar.name)
+				java.nio.file.Files.copy(jar.toPath(), targetFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+				println "[${DateFormatted()}] Copied: ${jar.name} to ${targetFile.absolutePath}"
+			}
+		}
+
+		println "\n[${DateFormatted()}] [OK] ${modulesToCopy.size()} module(s) copied successfully: ${modulesToCopy.join(', ')}"
+	}
+}
+
+tasks.register('iP') {
+    doLast {
+        incrementVersion('patch')
+    }
+}
+
+tasks.register('im') {
+    doLast {
+        incrementVersion('minor')
+    }
+}
+
+tasks.register('iM') {
+    doLast {
+        incrementVersion('major')
+    }
+}
+
+tasks.register('increment') {
+    doLast {
+        incrementVersion('patch')
+    }
+}
+
+def incrementVersion(String type) {
+    def propsFile = file('gradle.properties')
+    
+    def reloadProperties = {
+        def props = new Properties()
+        propsFile.withInputStream { props.load(it) }
+        props.each { key, value ->
+            project.ext.set(key.toString(), value.toString())
+        }
+        if (props.containsKey('mod_version')) {
+            project.version = props.getProperty('mod_version')
+        }
+    }
+    
+    def lines = propsFile.readLines()
+    def currentVersion = null
+    def versionLineIndex = -1
+    
+    def filteredLines = lines.findAll { line ->
+        def trimmed = line.trim()
+        return !trimmed.startsWith('# Mis à jour par la tâche') && 
+               !trimmed.matches(/# [a-zA-Zàâäéèêëïîôöùûüÿç]+ \d+ [a-zA-Zàâäéèêëïîôöùûüÿç]+ \d+ à \d+:\d+/)
+    }
+    
+    for (int i = 0; i < filteredLines.size(); i++) {
+        def line = filteredLines[i].trim()
+        if (line.startsWith('mod_version=')) {
+            currentVersion = line.substring('mod_version='.length())
+            versionLineIndex = i
+            break
+        }
+    }
+    
+    if (currentVersion == null) {
+        throw new RuntimeException("mod_version not found in gradle.properties")
+    }
+    
+    println "[i] Current version: ${currentVersion}"
+    
+    // mod_version formats accepted: <M>.<m>.<p> or <M>.<m>.<p>-for-<minecraft_version> (e.g., <modname>-0.1.0 or <modname>-0.1.0-for-1.21.5)
+    def versionRegex = /(\d+)\.(\d+)\.(\d+)(-for-.+)?/
+    def matcher = currentVersion =~ versionRegex
+    
+    if (!matcher.matches()) {
+        throw new RuntimeException("Version format not supported: ${currentVersion}. Expected: <major>.<minor>.<patch>[ -for-<minecraft_version>]")
+    }
+    
+    def major = matcher[0][1] as Integer
+    def minor = matcher[0][2] as Integer  
+    def patch = matcher[0][3] as Integer
+    def suffix = matcher[0].size() > 4 ? (matcher[0][4] ?: "") : ""
+    
+    switch (type) {
+        case 'patch':
+            patch++
+            break
+        case 'minor':
+            minor++
+            patch = 0
+            break
+        case 'major':
+            major++
+            minor = 0
+            patch = 0
+            break
+    }
+    
+    def newVersion = "${major}.${minor}.${patch}${suffix}"
+    
+    filteredLines[versionLineIndex] = "mod_version=${newVersion}"
+    
+    def now = new Date()
+    def frenchFormat = new java.text.SimpleDateFormat("EEEE d MMMM yyyy '\u00e0' HH:mm", java.util.Locale.FRENCH)
+    def timestamp = frenchFormat.format(now)
+    
+    propsFile.withWriter('UTF-8') { writer ->
+        writer.println("# Mis \u00e0 jour par la t\u00e2che increment${type.capitalize()}")
+        writer.println("# ${timestamp}")
+
+        if (!filteredLines.isEmpty() && !filteredLines[0].trim().isEmpty()) {
+            writer.println("")
+        }
+        
+        filteredLines.each { line ->
+            writer.println(line)
+        }
+    }
+    
+    println "[^] Version updated: ${currentVersion} To ${newVersion}"
+    
+    reloadProperties()
+}
