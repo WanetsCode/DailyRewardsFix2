@@ -1,8 +1,0 @@
--------------------------------------------------------
-Hypixel Assets
--------------------------------------------------------
-Textures and sound effects located in
-assets/dailyrewards/hypixel/ are © Hypixel Inc.
-Used under Hypixel's Fan Content Policy
-(https://hypixel.net/fancontent). All rights reserved.
-This project is not affiliated with nor endorsed by Hypixel.
